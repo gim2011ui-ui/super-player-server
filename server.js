@@ -11,7 +11,7 @@ const rooms = new Map();
 class GameRoom {
     constructor(roomId) {
         this.roomId = roomId;
-        this.clients = new Map(); // ws -> userId
+        this.clients = new Map(); // ws -> { userId, slot }
         this.engine = Matter.Engine.create({ enableSleeping: true });
         this.engine.gravity.y = 0; this.engine.gravity.scale = 0;
         this.pucks = [];
@@ -63,7 +63,7 @@ class GameRoom {
     broadcast() {
         if (this.winnerId) return; 
         const msg = JSON.stringify({ type: 'state', state: this.getState() });
-        this.clients.forEach((userId, ws) => { if (ws.readyState === WebSocket.OPEN) ws.send(msg); });
+        this.clients.forEach((data, ws) => { if (ws.readyState === WebSocket.OPEN) ws.send(msg); });
     }
 
     tick() {
@@ -77,16 +77,18 @@ class GameRoom {
         else if (p2 === 0) this.endGame(1);
     }
 
-    endGame(winnerOwner) {
+    endGame(winnerSlot) {
         if (this.winnerId) return;
         
-        const winnerEntry = [...this.clients.entries()].find(([ws, id]) => {
-            return (winnerOwner === 1 && ws.slot === 1) || (winnerOwner === 2 && ws.slot === 2);
+        // العثور على الآيدي الحقيقي بناءً على الـ Slot
+        let winnerRealId = 0;
+        this.clients.forEach((data, ws) => {
+            if (data.slot === winnerSlot) winnerRealId = data.userId;
         });
         
-        this.winnerId = winnerEntry ? winnerEntry[1] : 0;
+        this.winnerId = winnerRealId;
 
-        this.clients.forEach((userId, ws) => {
+        this.clients.forEach((data, ws) => {
             if (ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'game_over', winner_user_id: this.winnerId }));
             }
@@ -95,12 +97,15 @@ class GameRoom {
 
     handleLaunch(ws, msg) {
         if (!this.started || this.winnerId) return;
-        const owner = ws.slot;
+        const clientData = this.clients.get(ws);
+        if(!clientData) return;
+
+        const ownerSlot = clientData.slot;
         const puckId = Number(msg.puckId);
         const dx = Number(msg.dx);
         const dy = Number(msg.dy);
         
-        const puck = this.pucks.find(p => p.id === puckId && p.plugin.owner === owner);
+        const puck = this.pucks.find(p => p.id === puckId && p.plugin.owner === ownerSlot);
         if (!puck) return;
         
         const distance = Math.hypot(dx, dy);
@@ -112,14 +117,13 @@ class GameRoom {
     }
 
     addPlayer(ws, slot, userId) {
-        ws.slot = slot;
-        this.clients.set(ws, userId);
+        this.clients.set(ws, { slot, userId });
         
         ws.send(JSON.stringify({ type: 'joined', userId, slot, state: this.getState() }));
 
         if (this.clients.size === 2) {
             this.started = true;
-            this.clients.forEach((_, c) => {
+            this.clients.forEach((data, c) => {
                 if (c.readyState === WebSocket.OPEN) {
                     c.send(JSON.stringify({ type: 'start', state: this.getState() }));
                 }
@@ -128,11 +132,12 @@ class GameRoom {
     }
 
     relayWebRTC(ws, msg) {
-        const targetSlot = Number(msg.to);
-        const recipient = [...this.clients.keys()].find(c => c.slot === targetSlot);
-        if (recipient && recipient.readyState === WebSocket.OPEN) {
-            recipient.send(JSON.stringify({ type: 'webrtc', from: ws.slot, ...msg }));
-        }
+        const targetUserId = msg.to; 
+        this.clients.forEach((data, clientWs) => {
+            if (String(data.userId) === String(targetUserId) && clientWs.readyState === WebSocket.OPEN) {
+                clientWs.send(JSON.stringify({ type: 'webrtc', from_user_id: this.clients.get(ws).userId, ...msg }));
+            }
+        });
     }
 }
 
