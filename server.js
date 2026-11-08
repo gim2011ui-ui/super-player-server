@@ -120,7 +120,6 @@ class GameRoom {
   }
 
   addPlayer(ws, identity) {
-    // One authenticated identity per slot and one slot per identity.
     for (const [existingWs, data] of this.clients) {
       if (data.slot === identity.slot || data.userId === identity.uid) {
         this.send(ws, { type: 'error', code: 'SLOT_OCCUPIED' });
@@ -216,6 +215,7 @@ class GameRoom {
     let dx = Number(msg.dx);
     let dy = Number(msg.dy);
     if (!Number.isSafeInteger(puckId) || !Number.isFinite(dx) || !Number.isFinite(dy)) return;
+    
     if (client.slot === 2) { dx = -dx; dy = -dy; }
     const distance = Math.hypot(dx, dy);
     if (distance < CONFIG.MIN_DRAG || distance > CONFIG.MAX_DRAG) return;
@@ -225,8 +225,12 @@ class GameRoom {
     if (client.lastLaunchTimes.length >= CONFIG.MAX_LAUNCHES_PER_SECOND) return;
 
     const puck = this.pucks.find(p => p.id === puckId);
-    if (!puck || puck.plugin.owner !== client.slot) return;
-    // Prevent launching a puck that is already moving (e.g. duplicate/replayed requests).
+    if (!puck) return;
+
+    // التعديل الجديد: السماح للاعب بتحريك أي قرص موجود في نصفه
+    const isInMyHalf = client.slot === 1 ? (puck.position.y >= MID_Y) : (puck.position.y < MID_Y);
+    if (!isInMyHalf) return;
+
     if (Math.hypot(puck.velocity.x, puck.velocity.y) > CONFIG.IDLE_SPEED) return;
 
     const speed = Math.min(CONFIG.MAX_SPEED, distance * 0.095);
