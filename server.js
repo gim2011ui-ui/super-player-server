@@ -1,13 +1,67 @@
 const http = require('http');
+const crypto = require('crypto');
 const WebSocket = require('ws');
 const Matter = require('matter-js');
 
-const CONFIG = { W: 600, H: 900, R: 22, GAP: 50, BARRIER: 24, TICK_RATE: 1000/60, BROADCAST_RATE: 1000/20, RESTITUTION: 0.84, AIR_FRICTION: 0.014, WALL_RESTITUTION: 0.72, MAX_SPEED: 14, MAX_DRAG: 145, MIN_DRAG: 10, MAX_LAUNCHES_PER_SECOND: 8, IDLE_SPEED: 0.35 };
+const CONFIG = Object.freeze({
+  W: 600, H: 900, R: 22, GAP: 50, BARRIER: 24,
+  TICK_RATE: 1000 / 60,
+  BROADCAST_RATE: 1000 / 20,
+  RESTITUTION: 0.84,
+  AIR_FRICTION: 0.014,
+  WALL_RESTITUTION: 0.72,
+  MAX_SPEED: 14,
+  MAX_DRAG: 145,
+  MIN_DRAG: 10,
+  MAX_LAUNCHES_PER_SECOND: 8,
+  IDLE_SPEED: 0.35
+});
 const MID_Y = CONFIG.H / 2;
-const PORT = process.env.PORT || 8080;
-const server = http.createServer((req, res) => { res.writeHead(200); res.end('OK'); });
-const wss = new WebSocket.Server({ server });
+const PORT = Number(process.env.PORT || 8080);
+const WS_HMAC_SECRET = process.env.SP_WS_HMAC_SECRET || '';
+const MATCH_RESULT_SECRET = process.env.SP_MATCH_RESULT_SECRET || '';
+const MATCH_RESULT_URL = process.env.MATCH_RESULT_URL || 'https://YOUR-DOMAIN.example/api/receive_match_result.php';
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map(v => v.trim()).filter(Boolean);
+
+if (WS_HMAC_SECRET.length < 32) throw new Error('SP_WS_HMAC_SECRET must be at least 32 characters.');
+if (MATCH_RESULT_SECRET.length < 32) throw new Error('SP_MATCH_RESULT_SECRET must be at least 32 characters.');
+if (MATCH_RESULT_URL.includes('YOUR-DOMAIN')) throw new Error('Set MATCH_RESULT_URL to your real PHP API URL.');
+
 const rooms = new Map();
+
+function safeEqualHex(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
+  try { return crypto.timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex')); }
+  catch { return false; }
+}
+
+function verifyTicket(ticket, requestedRoomId) {
+  if (typeof ticket !== 'string' || ticket.length > 2048) return null;
+  const parts = ticket.split('.');
+  if (parts.length !== 2) return null;
+  const [body, signature] = parts;
+  const expected = crypto.createHmac('sha256', WS_HMAC_SECRET).update(body).digest('hex');
+  if (!safeEqualHex(signature, expected)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+    if (!Number.isSafeInteger(payload.uid) || payload.uid < 1) return null;
+    if (!Number.isSafeInteger(payload.mid) || payload.mid < 1) return null;
+    if (![1, 2].includes(payload.slot)) return null;
+    if (typeof payload.rid !== 'string' || payload.rid !== requestedRoomId) return null;
+    if (!Number.isSafeInteger(payload.exp) || payload.exp < Math.floor(Date.now() / 1000)) return null;
+    return payload;
+  } catch { return null; }
+}
+
+const server = http.createServer((req, res) => {
+  if (req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+    return;
+  }
+  res.writeHead(404); res.end();
+});
+const wss = new WebSocket.Server({ server, maxPayload: 4096, perMessageDeflate: false });
 
 class GameRoom {
   constructor(matchId, roomId) {
@@ -37,8 +91,8 @@ class GameRoom {
       Bodies.rectangle(CONFIG.W - blockW / 2, MID_Y, blockW, CONFIG.BARRIER, wallOpt)
     ]);
     for (const x of [100, 200, 300, 400, 500]) {
-      this.addPuck(1, x, CONFIG.H - 82);
-      this.addPuck(2, x, 82);
+      this.addPuck(1, x, CONFIG.H - 82); 
+      this.addPuck(2, x, 82);            
     }
   }
 
@@ -51,10 +105,10 @@ class GameRoom {
 
   send(ws, data) { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data)); }
 
-  addPlayer(ws, slot, userId) {
-    this.clients.set(ws, { slot, userId });
-    this.send(ws, { type: 'joined' });
-    this.send(ws, { type: 'state', state: { pucks: this.pucks.map(p => ({ id: p.id, x: p.position.x, y: p.position.y, owner: p.plugin.owner })) } });
+  addPlayer(ws, identity) {
+    this.clients.set(ws, { slot: identity.slot, userId: identity.uid });
+    this.send(ws, { type: 'joined', slot: identity.slot });
+    this.send(ws, { type: 'state', state: { started: this.started, pucks: this.pucks.map(p => ({ id: p.id, x: p.position.x, y: p.position.y, owner: p.plugin.owner })) } });
     if (this.clients.size === 2) {
       this.started = true;
       for (const c of this.clients.keys()) this.send(c, { type: 'start' });
@@ -63,16 +117,11 @@ class GameRoom {
 
   broadcast() {
     if (this.winnerId !== null) return;
-    for (const [ws, data] of this.clients) {
+    for (const [ws] of this.clients) {
       if (ws.readyState !== WebSocket.OPEN) continue;
-      const isSlot2 = data.slot === 2;
-      const pucks = this.pucks.map(p => ({
-        id: p.id,
-        x: isSlot2 ? CONFIG.W - p.position.x : p.position.x,
-        y: isSlot2 ? CONFIG.H - p.position.y : p.position.y,
-        owner: isSlot2 ? (p.plugin.owner === 1 ? 2 : 1) : p.plugin.owner
-      }));
-      this.send(ws, { type: 'state', state: { pucks } });
+      // إرسال البيانات الحقيقية دون عكس (العكس يتم في المتصفح)
+      const pucks = this.pucks.map(p => ({ id: p.id, x: p.position.x, y: p.position.y, owner: p.plugin.owner }));
+      this.send(ws, { type: 'state', state: { started: this.started, pucks } });
     }
   }
 
@@ -85,13 +134,23 @@ class GameRoom {
     else if (p2Count === 0) this.endGame(1);
   }
 
-  endGame(winnerSlot) {
+  async endGame(winnerSlot) {
     if (this.winnerId !== null) return;
     let winnerUserId = null;
     for (const data of this.clients.values()) {
       if (data.slot === winnerSlot) winnerUserId = data.userId;
     }
+    if (!winnerUserId) return;
     this.winnerId = winnerUserId;
+    
+    try {
+      await fetch(MATCH_RESULT_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-API-KEY': MATCH_RESULT_SECRET },
+        body: JSON.stringify({ match_id: this.matchId, winner_id: winnerUserId })
+      });
+    } catch(e) {}
+
     for (const [ws, data] of this.clients) {
       this.send(ws, { type: 'game_over', isWinner: data.userId === winnerUserId, winnerId: winnerUserId });
     }
@@ -104,17 +163,29 @@ class GameRoom {
     const puckId = Number(msg.puckId);
     let dx = Number(msg.dx);
     let dy = Number(msg.dy);
+    // عكس اتجاه السحب للاعب الثاني (لأن شاشته معكوسة)
     if (client.slot === 2) { dx = -dx; dy = -dy; }
     const distance = Math.hypot(dx, dy);
     if (distance < CONFIG.MIN_DRAG || distance > CONFIG.MAX_DRAG) return;
     const puck = this.pucks.find(p => p.id === puckId);
     if (!puck) return;
+    // التحقق من أن القرص في نصف اللاعب
     const isInMyHalf = client.slot === 1 ? (puck.position.y >= MID_Y) : (puck.position.y < MID_Y);
     if (!isInMyHalf) return;
     if (Math.hypot(puck.velocity.x, puck.velocity.y) > CONFIG.IDLE_SPEED) return;
     const speed = Math.min(CONFIG.MAX_SPEED, distance * 0.095);
     Matter.Body.setVelocity(puck, { x: (-dx / distance) * speed, y: (-dy / distance) * speed });
     Matter.Sleeping.set(puck, false);
+  }
+
+  relayWebRTC(ws, msg) {
+    const sender = this.clients.get(ws);
+    for (const [otherWs] of this.clients) {
+      if (otherWs !== ws) {
+        this.send(otherWs, { type: 'webrtc', from_user_id: sender.userId, offer: msg.offer, answer: msg.answer, candidate: msg.candidate });
+        break;
+      }
+    }
   }
 
   removePlayer(ws) {
@@ -128,23 +199,26 @@ class GameRoom {
 }
 
 wss.on('connection', (ws, req) => {
+  const origin = req.headers.origin || '';
+  if (ALLOWED_ORIGINS.length && !ALLOWED_ORIGINS.includes(origin)) { ws.close(4004, 'Origin not allowed'); return; }
   const url = new URL(req.url, 'http://localhost');
-  const roomId = url.searchParams.get('room_id');
-  const matchId = url.searchParams.get('match_id');
-  const slot = Number(url.searchParams.get('slot')) || 1;
-  const userId = url.searchParams.get('user_id') || '';
-  if (!roomId || !matchId || !userId) return ws.close();
+  const roomId = url.searchParams.get('room_id') || '';
+  const identity = verifyTicket(url.searchParams.get('ticket') || '', roomId);
+  if (!roomId || !identity) { ws.close(4001, 'Invalid ticket'); return; }
 
   let room = rooms.get(roomId);
   if (!room) {
-    room = new GameRoom(matchId, roomId);
+    room = new GameRoom(identity.mid, roomId);
     rooms.set(roomId, room);
+  } else if (room.matchId !== identity.mid) {
+    ws.close(4002, 'Match mismatch'); return;
   }
-  room.addPlayer(ws, slot, userId);
+  room.addPlayer(ws, identity);
 
   ws.on('message', raw => {
     let msg; try { msg = JSON.parse(raw.toString()); } catch { return; }
     if (msg.type === 'launch') room.handleLaunch(ws, msg);
+    else if (msg.type === 'webrtc') room.relayWebRTC(ws, msg);
   });
   ws.on('close', () => room.removePlayer(ws));
 });
