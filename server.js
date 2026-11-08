@@ -133,6 +133,10 @@ class GameRoom {
       lastLaunchTimes: []
     });
     this.send(ws, { type: 'joined', slot: identity.slot });
+    
+    // هذا السطر الجديد: إرسال الحالة فور الاتصال
+    this.send(ws, { type: 'state', state: { started: this.started, pucks: this.pucks.map(p => ({ id: p.id, x: p.position.x, y: p.position.y, owner: p.plugin.owner })) } });
+
     if (this.clients.size === 2) {
       this.started = true;
       for (const client of this.clients.keys()) this.send(client, { type: 'start' });
@@ -227,7 +231,6 @@ class GameRoom {
     const puck = this.pucks.find(p => p.id === puckId);
     if (!puck) return;
 
-    // التعديل الجديد: السماح للاعب بتحريك أي قرص موجود في نصفه
     const isInMyHalf = client.slot === 1 ? (puck.position.y >= MID_Y) : (puck.position.y < MID_Y);
     if (!isInMyHalf) return;
 
