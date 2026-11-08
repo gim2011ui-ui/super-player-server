@@ -11,7 +11,7 @@ const rooms = new Map();
 class GameRoom {
     constructor(roomId) {
         this.roomId = roomId;
-        this.clients = new Map(); 
+        this.clients = new Map(); // ws -> { userId, slot }
         this.engine = Matter.Engine.create({ enableSleeping: true });
         this.engine.gravity.y = 0; this.engine.gravity.scale = 0;
         this.pucks = [];
@@ -40,8 +40,8 @@ class GameRoom {
         
         const positions = [100, 200, 300, 400, 500];
         for (const x of positions) {
-            this.addPuck(1, x, CONFIG.H - 82); // 1 = Bottom (اللاعب صاحب الشاشة)
-            this.addPuck(2, x, 82);            // 2 = Top (الخصم)
+            this.addPuck(1, x, CONFIG.H - 82); // Slot 1
+            this.addPuck(2, x, 82);            // Slot 2
         }
     }
 
@@ -53,9 +53,28 @@ class GameRoom {
     }
 
     broadcast() {
-        if (this.winnerId) return; 
-        const msg = JSON.stringify({ type: 'state', state: { started: this.started, pucks: this.pucks.map(p => ({ id: p.id, x: p.position.x, y: p.position.y, owner: p.plugin.owner })) } });
-        this.clients.forEach((data, ws) => { if (ws.readyState === WebSocket.OPEN) ws.send(msg); });
+        if (this.winnerId) return;
+        this.clients.forEach((data, ws) => {
+            if (ws.readyState !== WebSocket.OPEN) return;
+            
+            // عكس الإحداثيات للاعب الثاني ليرى نفسه دائماً في الأسفل
+            const isSlot2 = data.slot === 2;
+            const pucksForClient = this.pucks.map(p => {
+                let px = p.position.x;
+                let py = p.position.y;
+                let ownerForClient = p.plugin.owner;
+                
+                if (isSlot2) {
+                    px = CONFIG.W - px;
+                    py = CONFIG.H - py;
+                    ownerForClient = (p.plugin.owner === 1) ? 2 : 1; // عكس الملكية
+                }
+                
+                return { id: p.id, x: px, y: py, owner: ownerForClient };
+            });
+
+            ws.send(JSON.stringify({ type: 'state', state: { started: this.started, pucks: pucksForClient } }));
+        });
     }
 
     tick() {
@@ -78,18 +97,16 @@ class GameRoom {
         });
         this.winnerId = winnerRealId;
 
-        // إرسال النتيجة إلى الاستضافة لحفظ الجوائز
         try {
             await fetch('https://zxm.zya.me/api/receive_match_result.php', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'X-API-KEY': 'SuperPlayer_Secure_2026_XYZ!' },
                 body: JSON.stringify({ match_id: this.roomId, winner_id: winnerRealId })
             });
-        } catch(e) { console.log('DB Error:', e); }
+        } catch(e) {}
 
         this.clients.forEach((data, ws) => {
             if (ws.readyState === WebSocket.OPEN) {
-                // نرسل للاعب ما إذا كان هو الفائز (لأنه يعرف الآيدي الخاص به)
                 ws.send(JSON.stringify({ type: 'game_over', isWinner: (data.userId === winnerRealId) }));
             }
         });
@@ -100,10 +117,15 @@ class GameRoom {
         const clientData = this.clients.get(ws);
         if(!clientData) return;
 
-        // عكس المنطق: إذا كان اللاعب 1 يلعب، فيريده أن يتحكم بقرصه
         const puckId = Number(msg.puckId);
-        const dx = Number(msg.dx);
-        const dy = Number(msg.dy);
+        let dx = Number(msg.dx);
+        let dy = Number(msg.dy);
+        
+        // إذا كان اللاعب 2، نعكس اتجاه السحب
+        if (clientData.slot === 2) {
+            dx = -dx;
+            dy = -dy;
+        }
         
         const puck = this.pucks.find(p => p.id === puckId);
         if (!puck) return;
@@ -118,14 +140,12 @@ class GameRoom {
 
     addPlayer(ws, slot, userId) {
         this.clients.set(ws, { slot, userId });
-        ws.send(JSON.stringify({ type: 'joined', userId, slot, state: { started: this.started, pucks: this.pucks.map(p => ({ id: p.id, x: p.position.x, y: p.position.y, owner: p.plugin.owner })) } }));
+        ws.send(JSON.stringify({ type: 'joined', userId, slot }));
 
         if (this.clients.size === 2) {
             this.started = true;
             this.clients.forEach((data, c) => {
-                if (c.readyState === WebSocket.OPEN) {
-                    c.send(JSON.stringify({ type: 'start' }));
-                }
+                if (c.readyState === WebSocket.OPEN) c.send(JSON.stringify({ type: 'start' }));
             });
         }
     }
