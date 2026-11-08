@@ -95,8 +95,8 @@ class GameRoom {
       Bodies.rectangle(CONFIG.W - blockW / 2, MID_Y, blockW, CONFIG.BARRIER, wallOpt)
     ]);
     for (const x of [100, 200, 300, 400, 500]) {
-      this.addPuck(1, x, CONFIG.H - 82); // Slot 1 starts bottom
-      this.addPuck(2, x, 82);            // Slot 2 starts top
+      this.addPuck(1, x, CONFIG.H - 82);
+      this.addPuck(2, x, 82);
     }
   }
 
@@ -110,8 +110,8 @@ class GameRoom {
   send(ws, data) { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data)); }
 
   addPlayer(ws, identity) {
-    this.clients.set(ws, { slot: identity.slot, userId: identity.uid, lastLaunchTimes: [] });
-    this.send(ws, { type: 'joined', slot: identity.slot });
+    this.clients.set(ws, { slot: identity.slot, userId: identity.uid });
+    this.send(ws, { type: 'joined', slot: identity.slot, userId: identity.uid });
     this.send(ws, { type: 'state', state: { started: this.started, pucks: this.pucks.map(p => ({ id: p.id, x: p.position.x, y: p.position.y, owner: p.plugin.owner })) } });
     if (this.clients.size === 2) {
       this.started = true;
@@ -124,19 +124,12 @@ class GameRoom {
     for (const [ws, data] of this.clients) {
       if (ws.readyState !== WebSocket.OPEN) continue;
       const isSlot2 = data.slot === 2;
-      
-      const pucks = this.pucks.map(p => {
-        let px = p.position.x;
-        let py = p.position.y;
-        let owner = p.plugin.owner;
-        if (isSlot2) {
-          px = CONFIG.W - px;
-          py = CONFIG.H - py;
-          owner = owner === 1 ? 2 : 1; // عكس الملكية للاعب الثاني
-        }
-        return { id: p.id, x: px, y: py, owner: owner };
-      });
-      
+      const pucks = this.pucks.map(p => ({
+        id: p.id,
+        x: isSlot2 ? CONFIG.W - p.position.x : p.position.x,
+        y: isSlot2 ? CONFIG.H - p.position.y : p.position.y,
+        owner: isSlot2 ? (p.plugin.owner === 1 ? 2 : 1) : p.plugin.owner
+      }));
       this.send(ws, { type: 'state', state: { started: this.started, pucks } });
     }
   }
@@ -144,15 +137,13 @@ class GameRoom {
   tick() {
     if (!this.started || this.winnerId !== null) return;
     Matter.Engine.update(this.engine, CONFIG.TICK_RATE);
-    
     let p1Count = 0, p2Count = 0;
     this.pucks.forEach(p => {
       if (p.position.y >= MID_Y) p1Count++;
       else p2Count++;
     });
-
-    if (p1Count === 0) this.endGame(2); // اللاعب 1 أخرج كل أقراصه، اللاعب 2 فاز
-    else if (p2Count === 0) this.endGame(1); // اللاعب 2 أخرج كل أقراصه، اللاعب 1 فاز
+    if (p1Count === 0) this.endGame(2);
+    else if (p2Count === 0) this.endGame(1);
   }
 
   async endGame(winnerSlot) {
@@ -164,17 +155,8 @@ class GameRoom {
     if (!winnerUserId) return;
     this.winnerId = winnerUserId;
     
-    // إرسال النتيجة
-    try {
-      await fetch(MATCH_RESULT_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-API-KEY': MATCH_RESULT_SECRET },
-        body: JSON.stringify({ match_id: this.matchId, winner_id: winnerUserId })
-      });
-    } catch (error) {}
-
     for (const [ws, data] of this.clients) {
-      this.send(ws, { type: 'game_over', isWinner: data.userId === winnerUserId });
+      this.send(ws, { type: 'game_over', isWinner: data.userId === winnerUserId, winnerId: winnerUserId });
     }
   }
 
@@ -182,23 +164,17 @@ class GameRoom {
     if (!this.started || this.winnerId !== null) return;
     const client = this.clients.get(ws);
     if (!client) return;
-    
     const puckId = Number(msg.puckId);
     let dx = Number(msg.dx);
     let dy = Number(msg.dy);
-    
     if (client.slot === 2) { dx = -dx; dy = -dy; }
     const distance = Math.hypot(dx, dy);
     if (distance < CONFIG.MIN_DRAG || distance > CONFIG.MAX_DRAG) return;
-
     const puck = this.pucks.find(p => p.id === puckId);
     if (!puck) return;
-
-    // التحقق من أن القرص في نصف اللاعب
     const isInMyHalf = client.slot === 1 ? (puck.position.y >= MID_Y) : (puck.position.y < MID_Y);
     if (!isInMyHalf) return;
     if (Math.hypot(puck.velocity.x, puck.velocity.y) > CONFIG.IDLE_SPEED) return;
-
     const speed = Math.min(CONFIG.MAX_SPEED, distance * 0.095);
     Matter.Body.setVelocity(puck, { x: (-dx / distance) * speed, y: (-dy / distance) * speed });
     Matter.Sleeping.set(puck, false);
