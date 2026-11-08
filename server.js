@@ -11,7 +11,7 @@ const rooms = new Map();
 class GameRoom {
     constructor(roomId) {
         this.roomId = roomId;
-        this.clients = new Map(); // key: ws, value: userId
+        this.clients = new Map(); // ws -> userId
         this.engine = Matter.Engine.create({ enableSleeping: true });
         this.engine.gravity.y = 0; this.engine.gravity.scale = 0;
         this.pucks = [];
@@ -63,7 +63,7 @@ class GameRoom {
     broadcast() {
         if (this.winnerId) return; 
         const msg = JSON.stringify({ type: 'state', state: this.getState() });
-        this.clients.forEach((_, ws) => { if (ws.readyState === WebSocket.OPEN) ws.send(msg); });
+        this.clients.forEach((userId, ws) => { if (ws.readyState === WebSocket.OPEN) ws.send(msg); });
     }
 
     tick() {
@@ -80,23 +80,22 @@ class GameRoom {
     endGame(winnerOwner) {
         if (this.winnerId) return;
         
-        // إيجاد الآيدي الحقيقي للاعب الفائز
         const winnerEntry = [...this.clients.entries()].find(([ws, id]) => {
-            return (winnerOwner === 1 && ws.playerId === 1) || (winnerOwner === 2 && ws.playerId === 2);
+            return (winnerOwner === 1 && ws.slot === 1) || (winnerOwner === 2 && ws.slot === 2);
         });
         
         this.winnerId = winnerEntry ? winnerEntry[1] : 0;
 
         this.clients.forEach((userId, ws) => {
             if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'game_over', winnerId: this.winnerId }));
+                ws.send(JSON.stringify({ type: 'game_over', winner_user_id: this.winnerId }));
             }
         });
     }
 
     handleLaunch(ws, msg) {
         if (!this.started || this.winnerId) return;
-        const owner = ws.playerId;
+        const owner = ws.slot;
         const puckId = Number(msg.puckId);
         const dx = Number(msg.dx);
         const dy = Number(msg.dy);
@@ -112,23 +111,27 @@ class GameRoom {
         Matter.Sleeping.set(puck, false);
     }
 
-    addPlayer(ws, playerId, userId) {
-        ws.playerId = playerId;
+    addPlayer(ws, slot, userId) {
+        ws.slot = slot;
         this.clients.set(ws, userId);
         
+        ws.send(JSON.stringify({ type: 'joined', userId, slot, state: this.getState() }));
+
         if (this.clients.size === 2) {
             this.started = true;
             this.clients.forEach((_, c) => {
-                if (c.readyState === WebSocket.OPEN) c.send(JSON.stringify({ type: 'start' }));
+                if (c.readyState === WebSocket.OPEN) {
+                    c.send(JSON.stringify({ type: 'start', state: this.getState() }));
+                }
             });
         }
     }
 
     relayWebRTC(ws, msg) {
-        const target = Number(msg.to);
-        const recipient = [...this.clients.keys()].find(c => c.playerId === target);
+        const targetSlot = Number(msg.to);
+        const recipient = [...this.clients.keys()].find(c => c.slot === targetSlot);
         if (recipient && recipient.readyState === WebSocket.OPEN) {
-            recipient.send(JSON.stringify({ type: 'webrtc', from: ws.playerId, ...msg }));
+            recipient.send(JSON.stringify({ type: 'webrtc', from: ws.slot, ...msg }));
         }
     }
 }
@@ -136,8 +139,8 @@ class GameRoom {
 wss.on('connection', (ws, req) => {
     const url = new URL(req.url, 'http://localhost');
     const roomId = url.searchParams.get('room_id'); 
-    const playerId = parseInt(url.searchParams.get('player_id')) || 1;
-    const userId = parseInt(url.searchParams.get('user_id')) || 0;
+    const slot = parseInt(url.searchParams.get('player_id')) || 1;
+    const userId = url.searchParams.get('user_id') || '0';
 
     if (!roomId) return ws.close();
     if (!rooms.has(roomId)) rooms.set(roomId, new GameRoom(roomId));
@@ -145,8 +148,7 @@ wss.on('connection', (ws, req) => {
     const room = rooms.get(roomId);
     if (room.clients.size >= 2) return ws.close();
     
-    room.addPlayer(ws, playerId, userId);
-    ws.send(JSON.stringify({ type: 'state', state: room.getState() }));
+    room.addPlayer(ws, slot, userId);
 
     ws.on('message', data => {
         try {
