@@ -80,7 +80,7 @@ class GameRoom {
     endGame(winnerSlot) {
         if (this.winnerId) return;
         
-        // العثور على الآيدي الحقيقي بناءً على الـ Slot
+        // إيجاد الآيدي الحقيقي بناءً على الـ Slot
         let winnerRealId = 0;
         this.clients.forEach((data, ws) => {
             if (data.slot === winnerSlot) winnerRealId = data.userId;
