@@ -5,8 +5,8 @@ const Matter = require('matter-js');
 
 const CONFIG = Object.freeze({
   W: 600, H: 900, R: 22, GAP: 50, BARRIER: 24,
-  TICK_RATE: 1000 / 30,        // خفضنا الفيزياء إلى 30 إطاراً
-  BROADCAST_RATE: 1000 / 15,   // خفضنا إرسال البيانات إلى 15 مرة في الثانية
+  TICK_RATE: 1000 / 60,
+  BROADCAST_RATE: 1000 / 20,
   RESTITUTION: 0.84,
   AIR_FRICTION: 0.014,
   WALL_RESTITUTION: 0.72,
@@ -132,8 +132,8 @@ class GameRoom {
       userId: identity.uid,
       lastLaunchTimes: []
     });
+    this.send(ws, { type: 'joined', slot: identity.slot });
     
-    // إرسال الحالة فوراً عند الدخول لضمان الظهور
     this.send(ws, { type: 'state', state: { started: this.started, pucks: this.pucks.map(p => ({ id: p.id, x: p.position.x, y: p.position.y, owner: p.plugin.owner })) } });
 
     if (this.clients.size === 2) {
