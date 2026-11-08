@@ -1,0 +1,13 @@
+{
+  "name": "game-server",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0",
+    "mysql2": "^3.9.7",
+    "matter-js": "^0.20.0"
+  }
+}
