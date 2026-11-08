@@ -84,8 +84,7 @@ class GameRoom {
         const loserId = winnerOwner === 1 ? this.players[1] : this.players[0];
         
         try {
-            // 
-          const response = await fetch('https://zxm.zya.me/api/receive_match_result.php', {
+            const response = await fetch('https://zxm.zya.me/api/receive_match_result.php', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -128,7 +127,6 @@ wss.on('connection', (ws, req) => {
     if (!matchId) return ws.close();
     
     if (!rooms.has(matchId)) {
-        // 
         rooms.set(matchId, new GameRoom(matchId, 1, 2)); 
     }
     
@@ -137,6 +135,9 @@ wss.on('connection', (ws, req) => {
     
     ws.roomId = matchId;
     room.clients.set(ws, true);
+    
+  
+    room.broadcast();
     
     ws.on('message', data => {
         try {
