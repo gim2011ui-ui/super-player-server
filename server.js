@@ -1,6 +1,5 @@
 const http = require('http');
 const WebSocket = require('ws');
-const mysql = require('mysql2/promise');
 const Matter = require('matter-js');
 
 const CONFIG = {
@@ -9,19 +8,9 @@ const CONFIG = {
 };
 const MID_Y = CONFIG.H / 2;
 
-const dbConfig = {
-    host: process.env.DB_HOST,
-    user: process.env.DB_USER,
-    password: process.env.DB_PASS,
-    database: process.env.DB_NAME,
-    port: process.env.DB_PORT || 3306
-};
-
 const server = http.createServer();
 const wss = new WebSocket.Server({ server });
 const rooms = new Map();
-
-async function getDb() { return await mysql.createConnection(dbConfig); }
 
 class GameRoom {
     constructor(matchId, p1Id, p2Id) {
@@ -95,16 +84,24 @@ class GameRoom {
         const loserId = winnerOwner === 1 ? this.players[1] : this.players[0];
         
         try {
-            if (dbConfig.host) {
-                const db = await getDb();
-                await db.beginTransaction();
-                await db.execute("UPDATE users SET zx_balance = zx_balance + 250 WHERE id = ?", [winnerId]);
-                await db.execute("UPDATE users SET coins = coins + 100 WHERE id = ?", [loserId]);
-                await db.execute("UPDATE matches SET status = 'finished', winner_id = ?, finished_at = NOW() WHERE id = ?", [winnerId, this.matchId]);
-                await db.commit();
-                await db.end();
-            }
-        } catch(e) { console.error('DB Error:', e.message); }
+            // 
+          const response = await fetch('https://zxm.zya.me/api/receive_match_result.php', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-API-KEY': 'SuperPlayer_Secure_2026_XYZ!'
+                },
+                body: JSON.stringify({
+                    match_id: this.matchId,
+                    winner_id: winnerId,
+                    loser_id: loserId
+                })
+            });
+            const result = await response.json();
+            console.log('Result sync:', result);
+        } catch(e) { 
+            console.error('Sync Error:', e.message); 
+        }
         
         this.broadcast();
         setTimeout(() => rooms.delete(this.matchId), 5000);
@@ -131,17 +128,8 @@ wss.on('connection', (ws, req) => {
     if (!matchId) return ws.close();
     
     if (!rooms.has(matchId)) {
-        if (dbConfig.host) {
-            getDb().then(async db => {
-                const [rows] = await db.execute("SELECT player1_id, player2_id FROM matches WHERE id = ? AND status = 'active'", [matchId]);
-                if (rows.length) {
-                    rooms.set(matchId, new GameRoom(matchId, rows[0].player1_id, rows[0].player2_id));
-                }
-                await db.end();
-            }).catch(console.error);
-        } else {
-            rooms.set(matchId, new GameRoom(matchId, 1, 2));
-        }
+        // 
+        rooms.set(matchId, new GameRoom(matchId, 1, 2)); 
     }
     
     const room = rooms.get(matchId);
